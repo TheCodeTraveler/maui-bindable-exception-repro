@@ -1,0 +1,60 @@
+name: Repro
+
+on:
+    push:
+        branches: [main]
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+concurrency:
+    group: repro-${{ github.ref }}
+    cancel-in-progress: true
+
+env:
+    DOTNET_NOLOGO: 'true'
+    DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+
+jobs:
+    repro:
+        name: ${{ matrix.leg }} (${{ matrix.os }})
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 15
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ubuntu-latest]
+                leg: [bug, control, workaround]
+        steps:
+            -   name: Checkout code
+                uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            -   name: Setup .NET
+                uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+                with:
+                    global-json-file: global.json
+
+            -   name: Restore packages
+                run: dotnet restore src/Repro/Repro.csproj
+
+            -   name: Build repro app
+                run: dotnet build src/Repro/Repro.csproj -c Release --no-restore
+
+            -   name: Run ${{ matrix.leg }} leg
+                shell: bash
+                run: |
+                    mkdir -p results
+                    dotnet src/Repro/bin/Release/net11.0/Repro.dll "${{ matrix.leg }}" results 2>&1 | tee "results/${{ matrix.leg }}.log"
+
+            -   name: Assert ${{ matrix.leg }} leg
+                shell: bash
+                run: python3 assert_leg.py "${{ matrix.leg }}" "results/${{ matrix.leg }}.log" "results/${{ matrix.leg }}.json"
+
+            -   name: Upload results
+                if: always()
+                uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+                with:
+                    name: results-${{ matrix.leg }}-${{ matrix.os }}
+                    path: results/
+                    if-no-files-found: error
