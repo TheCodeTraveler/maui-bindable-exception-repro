@@ -48,6 +48,7 @@ jobs:
                     dotnet src/Repro/bin/Release/net11.0/Repro.dll "${{ matrix.leg }}" results 2>&1 | tee "results/${{ matrix.leg }}.log"
 
             -   name: Assert ${{ matrix.leg }} leg
+                if: ${{ !cancelled() }}
                 shell: bash
                 run: python3 assert_leg.py "${{ matrix.leg }}" "results/${{ matrix.leg }}.log" "results/${{ matrix.leg }}.json"
 

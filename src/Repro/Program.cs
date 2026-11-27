@@ -4,9 +4,6 @@ using System.Text.Json;
 using Microsoft.Maui.Controls;
 using Microsoft.Maui.Dispatching;
 
-// bug: the trigger (an exception during a property write) fires and escapes to the caller.
-// control: identical steps, nothing throws.
-// workaround: the exception still happens but is caught inside the callback, so it never escapes SetValue.
 var mode = args.Length > 0 ? args[0] : "bug";
 if (mode is not ("bug" or "control" or "workaround"))
 {
@@ -17,8 +14,10 @@ if (mode is not ("bug" or "control" or "workaround"))
 var resultsDirectory = args.Length > 1 ? args[1] : "results";
 Directory.CreateDirectory(resultsDirectory);
 
+// A console app has no dispatcher and MAUI bindings throw without one; MAUI's own unit tests install a stub the same way.
 DispatcherProvider.SetCurrent(new InlineDispatcherProvider());
 
+var mauiVersion = typeof(BindableObject).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
 var throwing = mode != "control";
 var catchInsideCallback = mode == "workaround";
 var thrownCount = 0;
@@ -35,9 +34,9 @@ foreach (var scenario in scenarios)
 	Console.WriteLine($"[{mode}] {scenario.Name}: observed '{scenario.Observed}', expected '{scenario.Expected}', stuckValue '{scenario.StuckValue}', thrown {scenario.ThrownCount}, escapedToCaller {scenario.EscapedToCaller}, queuedWritesNeverApplied {scenario.QueuedWritesNeverApplied}, applyingStuck {scenario.ApplyingStuck} -> {(scenario.Observed == scenario.Expected ? "OK" : "STUCK")}");
 
 File.WriteAllText(Path.Combine(resultsDirectory, $"{mode}.json"),
-	JsonSerializer.Serialize(new { mode, scenarios }, new JsonSerializerOptions { WriteIndented = true }));
+	JsonSerializer.Serialize(new { mode, mauiVersion, scenarios }, new JsonSerializerOptions { WriteIndented = true }));
 
-Console.WriteLine($"C11-REPRO-DONE mode={mode} scenarios={scenarios.Count}");
+Console.WriteLine($"C11-REPRO-DONE mode={mode} scenarios={scenarios.Count} mauiVersion={mauiVersion}");
 return 0;
 
 ScenarioResult RunEventHandlerScenario()
