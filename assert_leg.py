@@ -25,14 +25,38 @@ except OSError:
 if marker_found and len(scenarios) != 4:
     failures.append(f"expected 4 scenarios, found {len(scenarios)}")
 
-for scenario in scenarios:
-    stuck = scenario["Observed"] != scenario["Expected"]
-    ok = stuck == expect_bug
-    verdict = "stuck" if stuck else "updated"
+for index, scenario in enumerate(scenarios):
+    observed, expected = scenario["Observed"], scenario["Expected"]
+    thrown, escaped = scenario["ThrownCount"], scenario["EscapedToCaller"]
+    queued, applying = scenario["QueuedWritesNeverApplied"], scenario["ApplyingStuck"]
+    problems = []
+    if mode == "bug":
+        if observed != scenario["StuckValue"]:
+            problems.append(f"observed {observed!r}, wanted stuck value {scenario['StuckValue']!r}")
+        if thrown != 1:
+            problems.append(f"thrown {thrown}, wanted 1")
+        if not escaped:
+            problems.append("exception did not escape to caller")
+        if index < 3 and queued < 1:
+            problems.append(f"queued writes {queued}, wanted >= 1")
+        if index == 3 and not applying:
+            problems.append("_applying not stuck")
+    else:
+        if observed != expected:
+            problems.append(f"observed {observed!r}, wanted {expected!r}")
+        if thrown != (0 if mode == "control" else 1):
+            problems.append(f"thrown {thrown}, wanted {0 if mode == 'control' else 1}")
+        if escaped:
+            problems.append("exception escaped to caller")
+        if queued != 0:
+            problems.append(f"queued writes {queued}, wanted 0")
+        if applying:
+            problems.append("_applying stuck")
+    ok = not problems
     wanted = "stuck (bug shown)" if expect_bug else "updated (clean)"
-    rows.append(f"| {scenario['Name']} | {wanted} | {verdict} (observed `{scenario['Observed']}`, expected `{scenario['Expected']}`) | {'PASS' if ok else 'FAIL'} |")
+    rows.append(f"| {scenario['Name']} | {wanted} | observed `{observed}`, expected `{expected}`, thrown {thrown}, escaped {escaped}, queued {queued}, _applying stuck {applying} | {'PASS' if ok else 'FAIL'} |")
     if not ok:
-        failures.append(f"{scenario['Name']}: observed {verdict}, wanted {wanted}")
+        failures.append(f"{scenario['Name']}: " + "; ".join(problems))
 
 summary = [f"### Leg `{mode}`", "", "| Scenario | Expected | Observed | Result |", "|---|---|---|---|", *rows, ""]
 summary.append("Leg result: " + ("FAIL - " + "; ".join(failures) if failures else "PASS"))

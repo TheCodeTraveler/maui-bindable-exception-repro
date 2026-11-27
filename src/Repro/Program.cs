@@ -21,6 +21,7 @@ DispatcherProvider.SetCurrent(new InlineDispatcherProvider());
 
 var throwing = mode != "control";
 var catchInsideCallback = mode == "workaround";
+var thrownCount = 0;
 
 var scenarios = new List<ScenarioResult>
 {
@@ -31,7 +32,7 @@ var scenarios = new List<ScenarioResult>
 };
 
 foreach (var scenario in scenarios)
-	Console.WriteLine($"[{mode}] {scenario.Name}: observed '{scenario.Observed}', expected '{scenario.Expected}' -> {(scenario.Observed == scenario.Expected ? "OK" : "STUCK")}");
+	Console.WriteLine($"[{mode}] {scenario.Name}: observed '{scenario.Observed}', expected '{scenario.Expected}', stuckValue '{scenario.StuckValue}', thrown {scenario.ThrownCount}, escapedToCaller {scenario.EscapedToCaller}, queuedWritesNeverApplied {scenario.QueuedWritesNeverApplied}, applyingStuck {scenario.ApplyingStuck} -> {(scenario.Observed == scenario.Expected ? "OK" : "STUCK")}");
 
 File.WriteAllText(Path.Combine(resultsDirectory, $"{mode}.json"),
 	JsonSerializer.Serialize(new { mode, scenarios }, new JsonSerializerOptions { WriteIndented = true }));
@@ -41,19 +42,21 @@ return 0;
 
 ScenarioResult RunEventHandlerScenario()
 {
+	thrownCount = 0;
 	var probe = new ProbeObject();
 	probe.PropertyChanged += (_, e) =>
 	{
 		if (e.PropertyName == nameof(ProbeObject.Text) && probe.Text == "throw")
 			ThrowIfConfigured("handler failed");
 	};
-	CallAndSwallowTrigger(() => probe.Text = "throw");
+	var escaped = CallAndSwallowTrigger(() => probe.Text = "throw");
 	probe.Text = "after";
-	return new("PropertyChanged handler throws once, later write", probe.Text, "after", CountQueuedWrites(probe, ProbeObject.TextProperty));
+	return new("PropertyChanged handler throws once, later write", probe.Text, "after", "throw", thrownCount, escaped, CountQueuedWrites(probe, ProbeObject.TextProperty), false);
 }
 
 ScenarioResult RunPropertyChangedCallbackScenario()
 {
+	thrownCount = 0;
 	var probe = new ProbeObject
 	{
 		OnValueChanged = newValue =>
@@ -62,13 +65,14 @@ ScenarioResult RunPropertyChangedCallbackScenario()
 				ThrowIfConfigured("callback failed");
 		}
 	};
-	CallAndSwallowTrigger(() => probe.Value = "throw");
+	var escaped = CallAndSwallowTrigger(() => probe.Value = "throw");
 	probe.Value = "after";
-	return new("BindableProperty propertyChanged callback throws once, later write", probe.Value, "after", CountQueuedWrites(probe, ProbeObject.ValueProperty));
+	return new("BindableProperty propertyChanged callback throws once, later write", probe.Value, "after", "throw", thrownCount, escaped, CountQueuedWrites(probe, ProbeObject.ValueProperty), false);
 }
 
 ScenarioResult RunOneWayBindingScenario()
 {
+	thrownCount = 0;
 	var viewModel = new ViewModel();
 	var probe = new ProbeObject { BindingContext = viewModel };
 	probe.SetBinding(ProbeObject.TextProperty, new Binding(nameof(ViewModel.Name)));
@@ -77,20 +81,21 @@ ScenarioResult RunOneWayBindingScenario()
 		if (e.PropertyName == nameof(ProbeObject.Text) && probe.Text == "throw")
 			ThrowIfConfigured("handler failed");
 	};
-	CallAndSwallowTrigger(() => viewModel.Name = "throw");
+	var escaped = CallAndSwallowTrigger(() => viewModel.Name = "throw");
 	viewModel.Name = "from view model";
-	return new("OneWay binding: view model change after one throw", probe.Text, "from view model", CountQueuedWrites(probe, ProbeObject.TextProperty));
+	return new("OneWay binding: view model change after one throw", probe.Text, "from view model", "throw", thrownCount, escaped, CountQueuedWrites(probe, ProbeObject.TextProperty), false);
 }
 
 ScenarioResult RunTwoWaySetterScenario()
 {
+	thrownCount = 0;
 	var viewModel = new TwoWayViewModel { ThrowInSetter = value => { if (value == "throw") ThrowIfConfigured("source setter failed"); } };
 	var probe = new ProbeObject { BindingContext = viewModel };
 	probe.SetBinding(ProbeObject.TextProperty, new Binding(nameof(TwoWayViewModel.Name), BindingMode.TwoWay));
 	probe.SetBinding(ProbeObject.ValueProperty, new Binding(nameof(TwoWayViewModel.Other), BindingMode.TwoWay));
-	CallAndSwallowTrigger(() => probe.Text = "throw");
+	var escaped = CallAndSwallowTrigger(() => probe.Text = "throw");
 	probe.Value = "pushed";
-	return new("TwoWay: other property writes back after a source setter threw", viewModel.Other, "pushed", 0);
+	return new("TwoWay: other property writes back after a source setter threw", viewModel.Other, "pushed", "initial", thrownCount, escaped, CountQueuedWrites(probe, ProbeObject.ValueProperty), IsApplyingStuck(probe));
 }
 
 void ThrowIfConfigured(string message)
@@ -98,6 +103,7 @@ void ThrowIfConfigured(string message)
 	if (!throwing)
 		return;
 
+	thrownCount++;
 	try
 	{
 		throw new InvalidOperationException(message);
@@ -107,27 +113,39 @@ void ThrowIfConfigured(string message)
 	}
 }
 
-static void CallAndSwallowTrigger(Action action)
+static bool CallAndSwallowTrigger(Action action)
 {
 	try
 	{
 		action();
+		return false;
 	}
 	catch (Exception exception) when (exception is InvalidOperationException or TargetInvocationException)
 	{
+		return true;
 	}
 }
 
-// Reflection only reports the queue size for the log; the assertions never depend on it.
+// Reads MAUI internals only to show the root cause (queued writes that are never applied); the value checks use public API.
 static int CountQueuedWrites(BindableObject bindable, BindableProperty property)
 {
-	var getContext = typeof(BindableObject).GetMethod("GetContext", BindingFlags.Instance | BindingFlags.NonPublic, [typeof(BindableProperty)]);
-	var context = getContext?.Invoke(bindable, [property]);
-	var queue = context?.GetType().GetField("DelayedSetters")?.GetValue(context) as System.Collections.ICollection;
-	return queue?.Count ?? 0;
+	var getContext = typeof(BindableObject).GetMethod("GetContext", BindingFlags.Instance | BindingFlags.NonPublic, [typeof(BindableProperty)])
+		?? throw new InvalidOperationException("BindableObject.GetContext not found");
+	var context = getContext.Invoke(bindable, [property])
+		?? throw new InvalidOperationException("BindableObject.GetContext returned null");
+	var delayedSetters = context.GetType().GetField("DelayedSetters")
+		?? throw new InvalidOperationException("BindableObject property context field DelayedSetters not found");
+	return (delayedSetters.GetValue(context) as System.Collections.ICollection)?.Count ?? 0;
 }
 
-record ScenarioResult(string Name, string Observed, string Expected, int QueuedWritesNeverApplied);
+static bool IsApplyingStuck(BindableObject bindable)
+{
+	var applying = typeof(BindableObject).GetField("_applying", BindingFlags.Instance | BindingFlags.NonPublic)
+		?? throw new InvalidOperationException("BindableObject._applying not found");
+	return (bool)applying.GetValue(bindable)!;
+}
+
+record ScenarioResult(string Name, string Observed, string Expected, string StuckValue, int ThrownCount, bool EscapedToCaller, int QueuedWritesNeverApplied, bool ApplyingStuck);
 
 class ProbeObject : BindableObject
 {
