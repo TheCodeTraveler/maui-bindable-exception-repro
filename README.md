@@ -2,8 +2,8 @@
 
 In .NET MAUI, one exception thrown while a `BindableObject` property is being written leaves that property unable to change. Every later write is queued and never applied. A throwing TwoWay source setter also stops write-back for every other TwoWay property on the same object.
 
-- CI: (run link added after the first run)
-- Upstream issue: (to be filed)
+- CI: https://github.com/TheCodeTraveler/maui-bindable-exception-repro/actions/runs/45933257519 (green = all three jobs matched)
+- Upstream issue: https://github.com/dotnet/maui/issues/40683
 
 ## Repro
 
